@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
@@ -10,19 +10,13 @@ import os
 import models
 from database import get_db
 
-SECRET_KEY  = os.getenv("SECRET_KEY", "change-this-to-a-random-secret-in-production")
+SECRET_KEY  = os.getenv("SECRET_KEY", "change-this-secret")
 ALGORITHM   = "HS256"
 TOKEN_HOURS = 72
 
-pwd_ctx   = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2    = OAuth2PasswordBearer(tokenUrl="/auth/login")
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2  = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-COLORS = [
-    "#4f46e5","#dc2626","#059669","#d97706","#2563eb",
-    "#db2777","#7c3aed","#ea580c","#0891b2","#65a30d"
-]
-
-# ── SCHEMAS ──────────────────────────────────────────
 class RegisterSchema(BaseModel):
     name:        str
     email:       EmailStr
@@ -35,21 +29,21 @@ class TokenOut(BaseModel):
     faculty_name: str
     faculty_id:   int
 
-# ── HELPERS ──────────────────────────────────────────
 def hash_password(pw: str) -> str:
-    return pwd_ctx.hash(pw)
+    return pwd_ctx.hash(pw[:72])
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
+    return pwd_ctx.verify(plain[:72], hashed)
 
 def create_token(data: dict) -> str:
     payload = data.copy()
     payload["exp"] = datetime.utcnow() + timedelta(hours=TOKEN_HOURS)
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-# ── OPERATIONS ───────────────────────────────────────
 def register_faculty(db: Session, data: RegisterSchema):
-    if db.query(models.Faculty).filter(models.Faculty.email == data.email).first():
+    if db.query(models.Faculty).filter(
+        models.Faculty.email == data.email
+    ).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     if len(data.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
@@ -65,7 +59,11 @@ def register_faculty(db: Session, data: RegisterSchema):
     db.refresh(faculty)
 
     token = create_token({"sub": str(faculty.id), "email": faculty.email})
-    return TokenOut(access_token=token, faculty_name=faculty.name, faculty_id=faculty.id)
+    return TokenOut(
+        access_token=token,
+        faculty_name=faculty.name,
+        faculty_id=faculty.id
+    )
 
 def login_faculty(db: Session, email: str, password: str):
     faculty = db.query(models.Faculty).filter(
@@ -75,7 +73,11 @@ def login_faculty(db: Session, email: str, password: str):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
 
     token = create_token({"sub": str(faculty.id), "email": faculty.email})
-    return TokenOut(access_token=token, faculty_name=faculty.name, faculty_id=faculty.id)
+    return TokenOut(
+        access_token=token,
+        faculty_name=faculty.name,
+        faculty_id=faculty.id
+    )
 
 def get_current_faculty(token: str = Depends(oauth2), db: Session = Depends(get_db)):
     try:
@@ -84,7 +86,9 @@ def get_current_faculty(token: str = Depends(oauth2), db: Session = Depends(get_
     except (JWTError, TypeError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    faculty = db.query(models.Faculty).filter(models.Faculty.id == faculty_id).first()
+    faculty = db.query(models.Faculty).filter(
+        models.Faculty.id == faculty_id
+    ).first()
     if not faculty:
         raise HTTPException(status_code=401, detail="Faculty not found")
     return faculty
