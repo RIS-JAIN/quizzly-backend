@@ -1,6 +1,7 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from starlette.requests import Request
 from sqlalchemy.orm import Session
 import uvicorn
 
@@ -11,6 +12,21 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Quizzly API", version="1.0.0")
 
+@app.middleware("http")
+async def add_cors(request: Request, call_next):
+    if request.method == "OPTIONS":
+        from starlette.responses import Response
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,7 +35,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── AUTH ──────────────────────────────────────────────
 @app.post("/auth/register")
 def register(data: auth.RegisterSchema, db: Session = Depends(get_db)):
     return auth.register_faculty(db, data)
@@ -32,7 +47,6 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 def me(current=Depends(auth.get_current_faculty), db: Session = Depends(get_db)):
     return current
 
-# ── SESSIONS ─────────────────────────────────────────
 @app.post("/sessions/create")
 async def create_session(
     data: sessions.CreateSessionSchema,
@@ -69,12 +83,10 @@ def end_session(
 ):
     return sessions.end_session(db, code, current.id)
 
-# FIX: New live stats endpoint — real answer distribution for the faculty dashboard
 @app.get("/sessions/{code}/live-stats")
 def live_stats(code: str, q: int = 0, db: Session = Depends(get_db)):
     return sessions.get_live_stats(db, code, q)
 
-# ── REPORTS ──────────────────────────────────────────
 @app.get("/reports/sessions")
 def my_sessions(current=Depends(auth.get_current_faculty), db: Session = Depends(get_db)):
     return reports.get_faculty_sessions(db, current.id)
