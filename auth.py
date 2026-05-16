@@ -2,10 +2,10 @@ from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
-from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 import os
+import bcrypt as _bcrypt
 
 import models
 from database import get_db
@@ -14,8 +14,7 @@ SECRET_KEY  = os.getenv("SECRET_KEY", "change-this-secret")
 ALGORITHM   = "HS256"
 TOKEN_HOURS = 72
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2  = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 class RegisterSchema(BaseModel):
     name:        str
@@ -30,10 +29,10 @@ class TokenOut(BaseModel):
     faculty_id:   int
 
 def hash_password(pw: str) -> str:
-    return pwd_ctx.hash(pw[:72])
+    return _bcrypt.hashpw(pw[:72].encode(), _bcrypt.gensalt()).decode()
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain[:72], hashed)
+    return _bcrypt.checkpw(plain[:72].encode(), hashed.encode())
 
 def create_token(data: dict) -> str:
     payload = data.copy()
