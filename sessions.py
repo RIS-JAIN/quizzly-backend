@@ -12,7 +12,7 @@ COLORS = [
     "#db2777","#7c3aed","#ea580c","#0891b2","#65a30d"
 ]
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # ── SCHEMAS ──────────────────────────────────────────
 class CreateSessionSchema(BaseModel):
@@ -47,37 +47,36 @@ def _gen_code(db: Session) -> str:
 
 # ── AI QUESTION GENERATION ───────────────────────────
 async def _generate_questions(subject: str, topic: str, count: int) -> list:
-    if not ANTHROPIC_API_KEY:
+    if not GROQ_API_KEY:
         return _fallback_questions(subject, count)
-
     prompt = f"""Generate exactly {count} multiple-choice quiz questions about "{topic}" in the subject "{subject}" for college students.
-
 Return ONLY a valid JSON array, no markdown, no explanation. Format:
 [{{"question":"...?","options":["A","B","C","D"],"correct":0,"explanation":"One sentence."}}]
-
 Rules:
 - "correct" is 0-indexed (0=A, 1=B, 2=C, 3=D)
 - All 4 options must be plausible
 - Mix difficulty: 30% easy, 50% medium, 20% hard
 - Return exactly {count} questions about: {topic}"""
-
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             res = await client.post(
-                "https://api.anthropic.com/v1/messages",
+                "https://api.groq.com/openai/v1/chat/completions",
                 headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 4096,
-                    "messages": [{"role": "user", "content": prompt}]
+                    "model": "llama3-8b-8192",
+                    "messages": [
+                        {"role": "system", "content": "You return ONLY valid JSON arrays. No markdown, no explanation."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 4096
                 }
             )
         data = res.json()
-        raw  = data["content"][0]["text"]
+        raw  = data["choices"][0]["message"]["content"]
         raw  = raw.replace("```json", "").replace("```", "").strip()
         si, ei = raw.index("["), raw.rindex("]")
         import json
