@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 from pydantic import BaseModel
 from datetime import datetime
-import random, string, os, httpx
+import random, string, os, httpx, sys, json
 
 import models
 
@@ -13,9 +13,11 @@ COLORS = [
 ]
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+# FIX 1: Log key status at startup — visible in Render logs immediately
 if not GROQ_API_KEY:
-    import sys
     print("WARNING: GROQ_API_KEY is not set. Fallback questions will be used.", file=sys.stderr)
+else:
+    print(f"INFO: GROQ_API_KEY loaded (starts with: {GROQ_API_KEY[:8]}...)", file=sys.stderr)
 
 # ── SCHEMAS ──────────────────────────────────────────
 class CreateSessionSchema(BaseModel):
@@ -51,7 +53,9 @@ def _gen_code(db: Session) -> str:
 # ── AI QUESTION GENERATION ───────────────────────────
 async def _generate_questions(subject: str, topic: str, count: int) -> list:
     if not GROQ_API_KEY:
+        print("INFO: No GROQ_API_KEY, using fallback questions.", file=sys.stderr)
         return _fallback_questions(subject, count)
+
     prompt = f"""Generate exactly {count} multiple-choice quiz questions about "{topic}" in the subject "{subject}" for college students.
 Return ONLY a valid JSON array, no markdown, no explanation. Format:
 [{{"question":"...?","options":["A","B","C","D"],"correct":0,"explanation":"One sentence."}}]
@@ -60,6 +64,7 @@ Rules:
 - All 4 options must be plausible
 - Mix difficulty: 30% easy, 50% medium, 20% hard
 - Return exactly {count} questions about: {topic}"""
+
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             res = await client.post(
@@ -78,17 +83,29 @@ Rules:
                     "max_tokens": 4096
                 }
             )
+
+        # FIX 2: Check HTTP status BEFORE parsing.
+        # Previously a 401 (bad key) or 429 (rate limit) caused a silent
+        # KeyError on data["choices"] and fell back with zero log output.
+        if res.status_code != 200:
+            print(f"ERROR: Groq API returned HTTP {res.status_code}: {res.text[:300]}", file=sys.stderr)
+            return _fallback_questions(subject, count)
+
         data = res.json()
         raw  = data["choices"][0]["message"]["content"]
         raw  = raw.replace("```json", "").replace("```", "").strip()
         si, ei = raw.index("["), raw.rindex("]")
-        import json
         qs = json.loads(raw[si:ei+1])
+        print(f"INFO: Groq generated {len(qs)} questions for '{subject}' / '{topic}'", file=sys.stderr)
         return qs[:count]
-    except Exception:
+
+    except Exception as e:
+        # FIX 3: Log the actual error so you can see WHY it failed in Render logs
+        print(f"ERROR: Groq question generation failed: {type(e).__name__}: {e}", file=sys.stderr)
         return _fallback_questions(subject, count)
 
 def _fallback_questions(subject: str, count: int) -> list:
+    print(f"WARNING: Using fallback questions for subject='{subject}'", file=sys.stderr)
     bank = [
         {"question": "What does CPU stand for?",
          "options": ["Central Processing Unit","Computer Personal Unit","Core Program Unit","Central Program Utility"],
@@ -179,13 +196,13 @@ async def create_session(db: Session, data: CreateSessionSchema, faculty_id: int
         total_q    = data.total_q,
         time_per_q = data.time_per_q,
         faculty_id = faculty_id,
-        phase      = "waiting"
+        phase      = "waiting",
+        current_q  = 0
     )
     db.add(session)
     db.commit()
     db.refresh(session)
 
-    # Generate AI questions
     questions_data = await _generate_questions(data.subject, data.topic, data.total_q)
     for i, q in enumerate(questions_data):
         question = models.Question(
@@ -220,9 +237,6 @@ async def create_session(db: Session, data: CreateSessionSchema, faculty_id: int
         ]
     }
 
-# FIX 1: Strip correct answers from the join/poll response so students
-# can't cheat by reading the API response in DevTools. The correct answer
-# and explanation are revealed only via submit_answer after they answer.
 def get_session_join_info(db: Session, code: str):
     session = db.query(models.QuizSession).filter(
         models.QuizSession.code == code.upper()
@@ -242,13 +256,12 @@ def get_session_join_info(db: Session, code: str):
         "current_q": session.current_q,
         "players":   [{"name": p.name, "color": p.color, "score": p.score}
                       for p in session.players],
-        # FIXED: no "correct" or "explanation" fields exposed here
         "questions": [
             {
                 "index":   q.order_index,
                 "question": q.question_text,
                 "options":  q.options,
-                # correct and explanation intentionally omitted
+                # correct and explanation intentionally omitted - anti-cheat
             }
             for q in session.questions
         ]
@@ -303,13 +316,12 @@ def join_session(db: Session, code: str, data: JoinSchema):
         "current_q":  session.current_q,
         "players":    [{"name": p.name, "color": p.color, "score": p.score}
                        for p in session.players],
-        # FIXED: no "correct" or "explanation" fields exposed here
         "questions":  [
             {
                 "index":    q.order_index,
                 "question": q.question_text,
                 "options":  q.options,
-                # correct and explanation intentionally omitted
+                # correct and explanation intentionally omitted - anti-cheat
             }
             for q in session.questions
         ]
@@ -336,7 +348,6 @@ def submit_answer(db: Session, code: str, data: SubmitSchema):
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    # Prevent duplicate submission
     already = db.query(models.Answer).filter(
         models.Answer.player_id   == player.id,
         models.Answer.question_id == question.id
@@ -365,13 +376,39 @@ def submit_answer(db: Session, code: str, data: SubmitSchema):
         player.correct_count += 1
 
     db.commit()
-    # correct_answer and explanation are safe to return here — student already answered
     return {
         "is_correct":     is_correct,
         "points":         pts,
         "total_score":    player.score,
         "correct_answer": question.correct,
         "explanation":    question.explanation
+    }
+
+# FIX 4: NEW /start endpoint replaces the old pattern of calling /next to start.
+# Old flow: startQuiz() → POST /next → backend current_q=1, frontend S.currentQ=0
+#           Faculty shows Q1 (index 0), students poll current_q=1 → show Q2 (index 1)
+#           → PERMANENT 1-question offset between faculty and students.
+#
+# New flow: startQuiz() → POST /start → backend current_q=0, phase='question'
+#           Faculty shows Q1 (index 0), students poll current_q=0 → show Q1 (index 0)
+#           → perfectly in sync. /next is now only called BETWEEN questions.
+def start_session(db: Session, code: str, faculty_id: int):
+    session = db.query(models.QuizSession).filter(
+        models.QuizSession.code == code.upper(),
+        models.QuizSession.faculty_id == faculty_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.phase != "waiting":
+        raise HTTPException(status_code=400, detail="Session already started")
+
+    session.phase = "question"
+    # current_q stays 0 — Q1 (index 0) is now active
+    db.commit()
+
+    return {
+        "current_q": session.current_q,
+        "phase":     session.phase
     }
 
 def next_question(db: Session, code: str, faculty_id: int):
@@ -383,7 +420,12 @@ def next_question(db: Session, code: str, faculty_id: int):
         raise HTTPException(status_code=404, detail="Session not found")
 
     session.current_q += 1
-    session.phase = "question" if session.current_q < session.total_q else "final"
+    # FIX 5: Never set phase=final here.
+    # Old code set phase=final when current_q reached total_q, causing students
+    # to be kicked to the results screen before faculty explicitly ended the session,
+    # which meant the last question's reveal was skipped entirely.
+    # Now only end_session() sets phase=final.
+    session.phase = "question"
     db.commit()
 
     players = db.query(models.Player).filter(
@@ -424,8 +466,6 @@ def end_session(db: Session, code: str, faculty_id: int):
         ]
     }
 
-# FIX 2: New endpoint — real live answer stats for the faculty dashboard.
-# Replaces the Math.random() simulation in the frontend.
 def get_live_stats(db: Session, code: str, question_index: int):
     session = db.query(models.QuizSession).filter(
         models.QuizSession.code == code.upper()
@@ -449,11 +489,10 @@ def get_live_stats(db: Session, code: str, question_index: int):
         if a.chosen is not None and 0 <= a.chosen <= 3:
             option_counts[a.chosen] += 1
 
-    answered   = len(answers)
-    correct_ct = sum(1 for a in answers if a.is_correct)
+    answered      = len(answers)
+    correct_ct    = sum(1 for a in answers if a.is_correct)
     total_players = len(session.players)
 
-    # Per-player detail rows for the faculty table
     player_rows = []
     for a in answers:
         player_rows.append({
@@ -466,7 +505,6 @@ def get_live_stats(db: Session, code: str, question_index: int):
             "time":      round(a.response_time, 1) if a.response_time else None
         })
 
-    # Players who haven't answered yet
     answered_player_ids = {a.player_id for a in answers}
     waiting = [
         {"name": p.name, "color": p.color, "score": p.score}
