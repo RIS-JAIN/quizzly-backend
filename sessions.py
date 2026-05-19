@@ -13,6 +13,9 @@ COLORS = [
 ]
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+if not GROQ_API_KEY:
+    import sys
+    print("WARNING: GROQ_API_KEY is not set. Fallback questions will be used.", file=sys.stderr)
 
 # ── SCHEMAS ──────────────────────────────────────────
 class CreateSessionSchema(BaseModel):
