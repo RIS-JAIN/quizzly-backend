@@ -60,6 +60,14 @@ def join_session(code: str, data: sessions.JoinSchema, db: Session = Depends(get
 def submit_answer(code: str, data: sessions.SubmitSchema, db: Session = Depends(get_db)):
     return sessions.submit_answer(db, code, data)
 
+@app.post("/sessions/{code}/start")
+def start_session(
+    code: str,
+    current=Depends(auth.get_current_faculty),
+    db: Session = Depends(get_db)
+):
+    return sessions.start_session(db, code, current.id)
+
 @app.post("/sessions/{code}/next")
 def next_question(
     code: str,
